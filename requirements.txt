@@ -1,0 +1,4 @@
+# OpenAI SDK for API calls (used in test_cost_of_conclusion.py)
+openai>=1.0.0
+# yaml file
+PyYAML >= 6.0.3
