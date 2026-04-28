@@ -1,4 +1,8 @@
-# OpenAI SDK for API calls (used in test_cost_of_conclusion.py)
+# Chat with LLM requires
 openai>=1.0.0
-# yaml file
+
+# Testing framework requires
+pytest>=7.0.0
+
+# source/sink yaml file requires
 PyYAML >= 6.0.3
