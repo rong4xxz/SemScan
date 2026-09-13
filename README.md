@@ -160,11 +160,27 @@ Kick-the-tires completed
   elapsed       : 101s
 ```
 
-> The bundled example is a true positive, so the LLM phase should report
-> `reachable: "yes"`. LLM output is non-deterministic, so the wording of the
-> summary and the number of discovered paths can vary between runs. The offline
-> phase is fully deterministic.
->
+What each phase actually asserts:
+
+- **Offline phase (deterministic).** The report must contain the two expected
+  locations, must have discovered the repository, must carry evidence whose text
+  really is the source and sink lines, and must report `reachable: "unknown"`.
+  This is what proves the environment and the analysis pipeline are wired up
+  correctly.
+- **LLM phase (non-deterministic).** The run must make planner and worker calls,
+  must report token usage, and must produce a verdict. The verdict itself is
+  deliberately **not** asserted. The bundled example is a true positive, but with
+  the default single planner round the model sometimes answers
+  `reachable: "yes"` and sometimes `reachable: "unknown"`, listing explicit gaps
+  it could not close in time.
+
+Give the planner more rounds if you want it to have a better chance of closing
+those gaps:
+
+```bash
+./scripts/kick_the_tires.sh --max-rounds 3
+```
+
 > If `ripgrep` is missing, the offline phase still passes; only phase 2 loses the
 > `gnu.rg` evidence source.
 
