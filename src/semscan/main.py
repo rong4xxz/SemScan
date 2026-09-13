@@ -9,7 +9,7 @@ import asyncio
 from pathlib import Path
 import sys
 
-from semscan.orchestrator import run_analysis
+from semscan.orchestrator import ConfigurationError, run_analysis
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,6 +45,11 @@ def main(argv: list[str] | None = None) -> int:
                 max_rounds=args.max_rounds,
             )
         )
+    except ConfigurationError as e:
+        # Configuration problems are user errors, so report them without a traceback.
+        print("[semscan] configuration error", file=sys.stderr)
+        print(f"[semscan]   {e}", file=sys.stderr)
+        return 3
     except Exception as e:
         print("[semscan] run failed", file=sys.stderr)
         print(f"[semscan]   {type(e).__name__}: {e!r}", file=sys.stderr)

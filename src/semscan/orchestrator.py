@@ -38,6 +38,14 @@ def _read_text(p: Path) -> str:
 _READ_TOOLS = {"repo.read_head", "repo.read_window", "repo.read_range"}
 
 
+class ConfigurationError(RuntimeError):
+    """Raised when the run configuration is invalid.
+
+    The typical case is enabling LLM mode without a usable API key. Such a run is
+    rejected instead of silently degrading to offline behavior.
+    """
+
+
 class Orchestrator:
     """
     Orchestrates the analysis flow: parse inputs, build skills and agents,
@@ -62,24 +70,49 @@ class Orchestrator:
         self.pipeline = SkillsPipeline(registry=self.registry)
 
         # Load LLMs if enabled.
+        # Configuration problems are fatal on purpose: silently falling back to
+        # --no-llm behavior would still produce a "successful" report, but that
+        # report contains no LLM reasoning at all (synthesis would be "unknown").
+        # Failing loudly is the only way for callers to notice a missing key.
         main_llm: Optional[Any] = None
         worker_llm: Optional[Any] = None
         if not no_llm:
             load_dotenv(dotenv)
+
             try:
                 from semscan.llm import LLMClient
-                api_key = os.getenv("PLANNER_API_KEY") or os.getenv("OPENAI_API_KEY")
-                base_url = os.getenv("PLANNER_BASE_URL") or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-                model = os.getenv("PLANNER_MODEL") or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-                if api_key:
-                    main_llm = LLMClient(api_key=api_key, base_url=base_url, model=model)
-                worker_key = os.getenv("WORKER_API_KEY") or api_key
-                worker_base = os.getenv("WORKER_BASE_URL") or base_url
-                worker_model = os.getenv("WORKER_MODEL") or model
-                if worker_key:
-                    worker_llm = LLMClient(api_key=worker_key, base_url=worker_base, model=worker_model)
             except Exception as e:
-                logger.warning("Failed to initialize LLM; falling back to no-llm behavior: %s", e)
+                raise ConfigurationError(
+                    "LLM mode is enabled but the 'openai' package could not be imported "
+                    f"({type(e).__name__}: {e}). Install the dependencies with "
+                    "'pip install -e . -r requirements.txt', or pass --no-llm to run offline."
+                ) from e
+
+            def _make_client(role: str, key: str, base: str, mdl: str) -> Any:
+                try:
+                    return LLMClient(api_key=key, base_url=base, model=mdl)
+                except Exception as e:
+                    raise ConfigurationError(
+                        f"Failed to initialize the {role} LLM client "
+                        f"(model={mdl!r}, base_url={base!r}): {type(e).__name__}: {e}. "
+                        f"Check the {role.upper()}_* variables in '{dotenv}', or pass --no-llm."
+                    ) from e
+
+            api_key = os.getenv("PLANNER_API_KEY") or os.getenv("OPENAI_API_KEY")
+            base_url = os.getenv("PLANNER_BASE_URL") or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+            model = os.getenv("PLANNER_MODEL") or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+            if not api_key:
+                raise ConfigurationError(
+                    "LLM mode is enabled but no API key was found. "
+                    f"Set PLANNER_API_KEY (or OPENAI_API_KEY) in '{dotenv}' "
+                    "(see config.env for a template), or pass --no-llm to run fully offline."
+                )
+            main_llm = _make_client("planner", api_key, base_url, model)
+
+            worker_key = os.getenv("WORKER_API_KEY") or api_key
+            worker_base = os.getenv("WORKER_BASE_URL") or base_url
+            worker_model = os.getenv("WORKER_MODEL") or model
+            worker_llm = _make_client("worker", worker_key, worker_base, worker_model)
 
         self.worker = WorkerAgent(
             name="worker-small",
