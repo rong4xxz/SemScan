@@ -33,14 +33,66 @@ SemScan/
 └── README.md
 ```
 
-## Environment Setup
+## System Requirements
+
+| Item | Requirement |
+| --- | --- |
+| Operating system | Linux or macOS (any POSIX-like system with a `bash` shell) |
+| Python | **3.9 or newer** (3.10+ recommended; verified on 3.9 and 3.10+) |
+| Python packages | `openai` and `PyYAML`, installed from `requirements.txt` |
+| External binary | [`ripgrep`](https://github.com/BurntSushi/ripgrep) (`rg`) available on `PATH` |
+| CPU / RAM | Any x86-64 or arm64 CPU; 2 cores and 4 GB RAM are sufficient |
+| GPU | **Not required.** SemScan is pure CPU: it performs file, AST and text analysis locally and calls a remote LLM over HTTP. It does not import `torch`, `tensorflow`, or any CUDA runtime. |
+| Disk space | ~200 MB (source code plus the bundled example target repository `CVE-2023-6730/`, ~70 MB) |
+| Network | Only required for LLM calls. `--no-llm` runs fully offline. |
+
+### About the `ripgrep` dependency
+
+The `gnu.rg` skill shells out to `ripgrep`, and the planner may select that tool
+during a run. If `rg` is missing, SemScan does **not** abort: the affected
+pipeline step records an error and the run continues with less evidence.
+
+`--no-llm` runs never use `gnu.rg`, so `ripgrep` is only required for LLM-backed runs.
+
+```bash
+# macOS (Homebrew)
+brew install ripgrep
+
+# Debian / Ubuntu
+sudo apt-get install -y ripgrep
+
+# other platforms: https://github.com/BurntSushi/ripgrep#installation
+```
+
+## Installation
+
+### One-shot installer (recommended)
+
+```bash
+./scripts/install.sh
+```
+
+This selects a suitable Python (>= 3.9), creates `.venv`, installs SemScan and
+its dependencies, checks for `ripgrep`, and verifies that the dependencies
+import. Override the interpreter or the environment location if needed:
+
+```bash
+PYTHON_BIN=python3.11 ./scripts/install.sh
+VENV_DIR=.venv-py311  ./scripts/install.sh
+```
+
+### Manual installation
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e .
-pip install -r requirements.txt
+python -m pip install --upgrade pip
+python -m pip install -e . -r requirements.txt
 ```
+
+> Both install targets are needed: `pyproject.toml` declares only `openai`, while
+> `PyYAML` lives in `requirements.txt`. Installing only one of them leaves
+> SemScan unable to parse `.yaml` rule files.
 
 ## Configuration
 
@@ -57,6 +109,64 @@ SemScan reads `.env` through `--dotenv` (default: `.env`). Typical fields are:
 - or fallback `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`
 
 If you do not want any LLM calls, run with `--no-llm`.
+
+## Test Drive (kick the tires)
+
+`scripts/kick_the_tires.sh` runs a minimal end-to-end analysis against the
+bundled example: `CVE-2023-6730`, an unsafe `pickle.load` in the RAG retriever of
+transformers 4.35.2, declared through one source and one sink. On a laptop the
+whole thing takes roughly two minutes.
+
+```bash
+./scripts/kick_the_tires.sh
+```
+
+The script runs two phases:
+
+| Phase | API key needed | What it verifies |
+| --- | --- | --- |
+| 1. Offline | no | Rule parsing, repository traversal, AST lookup, file reading, evidence extraction and report assembly (`--no-llm`) |
+| 2. LLM | yes | Planner/worker LLM calls, token accounting and the final reachability verdict |
+
+Phase 2 is **skipped automatically** when no API key is configured, so the script
+is safe to run before a provider has been set up.
+
+Options:
+
+```bash
+./scripts/kick_the_tires.sh --skip-llm       # offline phase only
+./scripts/kick_the_tires.sh --max-rounds 3   # more planner rounds
+DOTENV_FILE=/path/to/other.env ./scripts/kick_the_tires.sh
+```
+
+Outputs are written to `kick_the_tires_out/`:
+
+- `report_offline.json`, `report_llm.json` — the generated reports
+- `offline.log`, `llm.log` — the full run logs
+
+A successful run ends like this:
+
+```text
+all 26 checks passed
+
+Kick-the-tires completed
+
+  python        : /path/to/SemScan/.venv/bin/python (3.11.9)
+  ripgrep       : found
+  env file      : /path/to/SemScan/.env (found)
+  offline phase : passed   -> /path/to/SemScan/kick_the_tires_out/report_offline.json
+  llm phase     : passed
+  llm verdict   : yes
+  elapsed       : 101s
+```
+
+> The bundled example is a true positive, so the LLM phase should report
+> `reachable: "yes"`. LLM output is non-deterministic, so the wording of the
+> summary and the number of discovered paths can vary between runs. The offline
+> phase is fully deterministic.
+>
+> If `ripgrep` is missing, the offline phase still passes; only phase 2 loses the
+> `gnu.rg` evidence source.
 
 ## Rule File Formats
 
@@ -101,6 +211,27 @@ Common options:
 - `--dotenv`: env file path, default `.env`
 - `--max-rounds`: maximum planner/synthesis rounds, default `5`
 - `--no-llm`: disable planner/worker LLM calls
+
+### LLM mode requires an API key
+
+Without `--no-llm`, SemScan requires a usable API key. If none is configured, the
+run **fails immediately with a non-zero exit code** instead of silently degrading
+to an offline report:
+
+```text
+[semscan] configuration error
+[semscan]   LLM mode is enabled but no API key was found. Set PLANNER_API_KEY
+(or OPENAI_API_KEY) in '.env' (see config.env for a template), or pass --no-llm
+to run fully offline.
+```
+
+Exit codes:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Run completed and a report was written |
+| `2` | Unexpected runtime failure (a traceback is printed) |
+| `3` | Invalid configuration, e.g. LLM mode enabled without an API key |
 
 You can also use the helper script:
 
