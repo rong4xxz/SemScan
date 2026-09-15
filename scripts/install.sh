@@ -124,8 +124,9 @@ Next steps
 
        cp config.env .env     # then edit .env and set PLANNER_API_KEY
 
-  3) Run the smoke test. It needs no API key and finishes in seconds:
+  3) Run the smoke test on one benchmark entry. It needs no API key and
+     finishes in seconds:
 
-       ./scripts/kick_the_tires.sh
+       python scripts/batch_analyze.py --limit 1 --no-llm
 
 EOF

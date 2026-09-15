@@ -18,7 +18,11 @@ def build_parser() -> argparse.ArgumentParser:
         description="New architecture skeleton: multi-agent code data-flow analysis (aligned with semscan behavior)",
     )
     p.add_argument("--repo-root", required=True, help="Repository root path to analyze")
-    p.add_argument("--language", required=True, help="Programming language, e.g. python/javascript")
+    p.add_argument(
+        "--language",
+        default="python",
+        help="Programming language (default: python; the static tooling is Python-only)",
+    )
     p.add_argument("--source-file", required=True, help="Path to the source file list")
     p.add_argument("--sink-file", required=True, help="Path to the sink file list")
     p.add_argument("--out", default="report.json", help="Output report path")

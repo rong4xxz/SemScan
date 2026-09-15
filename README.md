@@ -7,11 +7,10 @@ SemScan is a repository-level vulnerability analysis prototype for source-to-sin
 SemScan takes:
 
 - a target repository root,
-- a programming language,
 - a source rule file,
 - a sink rule file,
 
-and produces a report describing local evidence, intermediate reasoning context, and a final reachability judgment.
+and produces a report describing local evidence, intermediate reasoning context, and a final reachability judgment. The analysis targets Python repositories: the static tooling is built on Python's own `ast` module.
 
 The current implementation under `src/semscan` follows a multi-stage flow:
 
@@ -24,10 +23,15 @@ The current implementation under `src/semscan` follows a multi-stage flow:
 
 ```text
 SemScan/
-├── src/semscan/          # core implementation
-├── rules/                # example source/sink rule files
-├── scripts/              # helper scripts
-├── CVE-2023-6730/        # example target repository / benchmark material
+├── src/semscan/                     # core implementation
+├── scripts/                         # installer, single-case runner, batch driver
+├── rules/
+│   ├── bench.jsonl                  # manifest: one entry per benchmark CVE
+│   └── bench/<CVE>/
+│       ├── source.jsonl             # source rules
+│       └── sink.jsonl               # sink rules
+├── benchmark/<CVE>/<repo>/          # target repositories (30 CVEs)
+├── config.env                       # environment template
 ├── requirements.txt
 ├── pyproject.toml
 └── README.md
@@ -102,97 +106,109 @@ Copy the template and fill in your model settings:
 cp config.env .env
 ```
 
-SemScan reads `.env` through `--dotenv` (default: `.env`). Typical fields are:
+SemScan reads `.env` through `--dotenv` (default: `.env`). Three groups of
+variables are recognised:
 
-- `PLANNER_API_KEY`, `PLANNER_BASE_URL`, `PLANNER_MODEL`
-- `WORKER_API_KEY`, `WORKER_BASE_URL`, `WORKER_MODEL`
-- or fallback `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`
-
-If you do not want any LLM calls, run with `--no-llm`.
-
-## Test Drive (kick the tires)
-
-`scripts/kick_the_tires.sh` runs a minimal end-to-end analysis against the
-bundled example: `CVE-2023-6730`, an unsafe `pickle.load` in the RAG retriever of
-transformers 4.35.2, declared through one source and one sink. On a laptop the
-whole thing takes roughly two minutes.
-
-```bash
-./scripts/kick_the_tires.sh
-```
-
-The script runs two phases:
-
-| Phase | API key needed | What it verifies |
+| Variables | Used by | Fallback when unset |
 | --- | --- | --- |
-| 1. Offline | no | Rule parsing, repository traversal, AST lookup, file reading, evidence extraction and report assembly (`--no-llm`) |
-| 2. LLM | yes | Planner/worker LLM calls, token accounting and the final reachability verdict |
+| `PLANNER_API_KEY`, `PLANNER_BASE_URL`, `PLANNER_MODEL` | main planning / synthesis agent | `OPENAI_*`, then the defaults `https://api.openai.com/v1` and `gpt-4o-mini` |
+| `WORKER_API_KEY`, `WORKER_BASE_URL`, `WORKER_MODEL` | worker agent (repository map, per-location analysis, step summaries) | **inherits the resolved planner values** |
+| `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL` | compatibility alias for the planner | — |
 
-Phase 2 is **skipped automatically** when no API key is configured, so the script
-is safe to run before a provider has been set up.
+### What happens if the `WORKER_*` variables are unset
 
-Options:
+**The worker agent still runs.** It is neither disabled nor reported as an
+error: each unset `WORKER_*` value falls back to the corresponding planner
+value, so both agents end up sharing one key, endpoint and model.
 
-```bash
-./scripts/kick_the_tires.sh --skip-llm       # offline phase only
-./scripts/kick_the_tires.sh --max-rounds 3   # more planner rounds
-DOTENV_FILE=/path/to/other.env ./scripts/kick_the_tires.sh
+```python
+worker_key   = os.getenv("WORKER_API_KEY")   or api_key    # planner key
+worker_base  = os.getenv("WORKER_BASE_URL")  or base_url   # planner base URL
+worker_model = os.getenv("WORKER_MODEL")     or model      # planner model
 ```
 
-Outputs are written to `kick_the_tires_out/`:
+Set a `WORKER_*` variable only when you want the worker to use a different
+(typically cheaper) model, for example:
 
-- `report_offline.json`, `report_llm.json` — the generated reports
-- `offline.log`, `llm.log` — the full run logs
+```bash
+PLANNER_MODEL=deepseek-reasoner
+WORKER_MODEL=deepseek-chat
+```
 
-A successful run ends like this:
+A key is still mandatory: with neither `PLANNER_API_KEY` nor `OPENAI_API_KEY`
+set, the run stops with a configuration error (exit code `3`) regardless of the
+worker variables.
+
+If you do not want any LLM calls, run with `--no-llm`. In that mode neither
+agent is created and `synthesis.reachable` is reported as `unknown`.
+
+## Test Drive
+
+The quickest way to verify the environment is to run the batch driver on a single
+benchmark entry. It needs no API key and finishes in seconds:
+
+```bash
+python scripts/batch_analyze.py --limit 1 --no-llm
+```
+
+This reads `rules/bench.jsonl`, takes the first entry, and runs it twice (every
+CVE is run twice by design). Reports land in `result/batch/<timestamp>/`,
+next to an aggregate `summary.json`:
 
 ```text
-all 26 checks passed
-
-Kick-the-tires completed
-
-  python        : /path/to/SemScan/.venv/bin/python (3.11.9)
-  ripgrep       : found
-  env file      : /path/to/SemScan/.env (found)
-  offline phase : passed   -> /path/to/SemScan/kick_the_tires_out/report_offline.json
-  llm phase     : passed
-  llm verdict   : yes
-  elapsed       : 101s
+[batch] CVE-2023-29374 => 2 runs (repo_root=.../benchmark/CVE-2023-29374/langchain-0.0.131)
+[batch] 总共 2 个任务，并发度 4
+[batch] [1/2] CVE-2023-29374_single_1 completed
+[batch] [2/2] CVE-2023-29374_single_2 completed
+[batch] done. summary => .../result/batch/20260915_111944/summary.json
 ```
 
-What each phase actually asserts:
+Each run records a small health record, so you can see what was actually produced
+without opening every report:
 
-- **Offline phase (deterministic).** The report must contain the two expected
-  locations, must have discovered the repository, must carry evidence whose text
-  really is the source and sink lines, and must report `reachable: "unknown"`.
-  This is what proves the environment and the analysis pipeline are wired up
-  correctly.
-- **LLM phase (non-deterministic).** The run must make planner and worker calls,
-  must report token usage, and must produce a verdict. The verdict itself is
-  deliberately **not** asserted. The bundled example is a true positive, but with
-  the default single planner round the model sometimes answers
-  `reachable: "yes"` and sometimes `reachable: "unknown"`, listing explicit gaps
-  it could not close in time.
+```json
+"ok": true,
+"exit_code": 0,
+"report_health": {
+  "no_llm": true,
+  "local_findings": 2,
+  "evidence_total": 2,
+  "reachable": "unknown"
+}
+```
 
-Give the planner more rounds if you want it to have a better chance of closing
-those gaps:
+`local_findings > 0` together with `evidence_total > 0` means the pipeline really
+parsed the rules, walked the repository, and extracted source code as evidence.
+Under `--no-llm` a `"reachable": "unknown"` verdict is expected: offline mode
+performs no synthesis by design.
+
+To exercise the LLM path as well, configure a key and drop `--no-llm`:
 
 ```bash
-./scripts/kick_the_tires.sh --max-rounds 3
+cp config.env .env      # then set PLANNER_API_KEY
+python scripts/batch_analyze.py --limit 1
 ```
 
-> If `ripgrep` is missing, the offline phase still passes; only phase 2 loses the
-> `gnu.rg` evidence source.
+That takes a few minutes and yields a real verdict. LLM output is
+non-deterministic, so the verdict and the wording of the summary vary between
+runs.
+
+> `--limit 1` uses the first entry of the manifest. Use `--limit N` for more
+> entries, or `--experiment FILE` to point at a different manifest.
+
+To run a single case with explicit paths instead of the manifest, use
+`scripts/analyze.sh` (see below).
 
 ## Rule File Formats
 
-SemScan currently accepts `jsonl` and `yaml` rule files. In one run, the source file and sink file should use the same format.
+SemScan currently accepts `jsonl` and `yaml` rule files. In one run, the source file and sink file should use the same format. The benchmark ships `jsonl` rules only.
 
-Example `jsonl`:
+`path` is relative to the analyzed repository root.
+
+Example — `rules/bench/CVE-2023-6730/source.jsonl`:
 
 ```jsonl
-{"path": "src/transformers/models/rag/retrieval_rag.py", "line": 419, "symbol": "retriever_name_or_path", "snippet": "", "note": ""}
-{"path": "src/transformers/models/rag/retrieval_rag.py", "line": 306, "symbol": "dataset_path", "snippet": "", "note": ""}
+{"path": "src/transformers/models/rag/retrieval_rag.py", "line": 419, "symbol": "retriever_name_or_path", "snippet": null, "note": null}
 ```
 
 Example `yaml`:
@@ -203,9 +219,6 @@ rules:
   - path: src/transformers/models/rag/retrieval_rag.py
     line: 419
     symbol: retriever_name_or_path
-  - path: src/transformers/models/rag/retrieval_rag.py
-    line: 306
-    symbol: dataset_path
 ```
 
 ## Running SemScan
@@ -214,16 +227,18 @@ Run the CLI directly:
 
 ```bash
 PYTHONPATH=src python -m semscan.main \
-  --repo-root /path/to/target-repo \
-  --language python \
-  --source-file ./rules/sources.jsonl \
-  --sink-file ./rules/sinks.jsonl \
+  --repo-root ./benchmark/CVE-2023-6730/transformers-4.35.2 \
+  --source-file ./rules/bench/CVE-2023-6730/source.jsonl \
+  --sink-file ./rules/bench/CVE-2023-6730/sink.jsonl \
   --out ./report.json
 ```
 
 Common options:
 
+- `--repo-root`: repository to analyze (required)
+- `--source-file`, `--sink-file`: rule files (required)
 - `--out`: output report path, default `report.json`
+- `--language`: analysis language, default `python`
 - `--dotenv`: env file path, default `.env`
 - `--max-rounds`: maximum planner/synthesis rounds, default `5`
 - `--no-llm`: disable planner/worker LLM calls
@@ -249,25 +264,30 @@ Exit codes:
 | `2` | Unexpected runtime failure (a traceback is printed) |
 | `3` | Invalid configuration, e.g. LLM mode enabled without an API key |
 
-You can also use the helper script:
+### Single-case helper script
+
+`scripts/analyze.sh` wraps the CLI with sensible defaults. Without further
+options it uses the bundled example rules
+(`rules/bench/CVE-2023-6730/source.jsonl` and `sink.jsonl`) and writes to
+`result/single/<timestamp>/report.json`:
 
 ```bash
-./scripts/analyze.sh /path/to/target-repo python
+./scripts/analyze.sh ./benchmark/CVE-2023-6730/transformers-4.35.2 --no-llm
 ```
 
-With extra options:
+Point it at other rules and an output path with `--source`, `--sink` and `--out`:
 
 ```bash
-./scripts/analyze.sh /path/to/target-repo python ./rules/sources.jsonl ./rules/sinks.jsonl report.json --no-llm
-./scripts/analyze.sh /path/to/target-repo python report.json --dotenv .env --max-rounds 3
+./scripts/analyze.sh ./benchmark/CVE-2023-51449/gradio-4.10.0 \
+  --source ./rules/bench/CVE-2023-51449/source.jsonl \
+  --sink   ./rules/bench/CVE-2023-51449/sink.jsonl \
+  --out    ./result/single/gradio.json \
+  --no-llm
 ```
 
-If explicit rules are omitted, `scripts/analyze.sh` will look for:
+Other options: `--dotenv FILE`, `--max-rounds N`, `--no-llm`, `-h`.
 
-- `./rules/source.yaml` and `./rules/sink.yaml`, or
-- `./rules/sources.jsonl` and `./rules/sinks.jsonl`
-
-When explicit rule files are provided, they must both be `.jsonl` or both be `.yaml`.
+The two rule files must use the same format: both `.jsonl` or both `.yaml`.
 
 ## Architecture Notes
 
@@ -279,21 +299,42 @@ When explicit rule files are provided, they must both be `.jsonl` or both be `.y
 
 In `--no-llm` mode, SemScan still parses inputs and runs the repository/tooling pipeline, but the final synthesis is reported as `unknown` instead of using planner reasoning.
 
-## Example Rules And Benchmark Material
+## Benchmark Material
 
-The repository already includes example rule files here:
+The benchmark ships **30 CVEs**, laid out as:
 
-- `rules/sources.jsonl`
-- `rules/sinks.jsonl`
+```text
+benchmark/<CVE>/<repo>/                # target repository
+rules/bench/<CVE>/source.jsonl         # source rules
+rules/bench/<CVE>/sink.jsonl           # sink rules
+```
 
-The repository also includes example benchmark/target material here:
+`rules/bench.jsonl` is the manifest: one JSON object per CVE, holding the
+repository path and the two rule paths.
 
-- `CVE-2023-6730/transformers-4.35.2/`
+```jsonl
+{"index": "CVE-2023-6730", "repo_path": "benchmark/CVE-2023-6730/transformers-4.35.2", "source": "rules/bench/CVE-2023-6730/source.jsonl", "sink": "rules/bench/CVE-2023-6730/sink.jsonl"}
+```
 
-If you specifically want benchmark-related subdirectories inside that example repository, see:
+All paths are relative to the repository root. Blank lines and lines starting
+with `//` or `#` are ignored, so an entry can be disabled without deleting it.
 
-- `CVE-2023-6730/transformers-4.35.2/scripts/benchmark`
-- `CVE-2023-6730/transformers-4.35.2/tests/benchmark`
+### Batch experiment driver
+
+`scripts/batch_analyze.py` reads `rules/bench.jsonl` and turns every entry into a
+task. Each CVE is run **twice** (two independent attempts), using a thread pool
+and per-run retries:
+
+```bash
+python scripts/batch_analyze.py --out-dir out --concurrency 4
+```
+
+Useful options: `--limit N` (only the first N entries), `--no-llm`,
+`--max-rounds N`, `--retries N`, `--timeout-s N`, `--benchmark-root DIR`.
+
+Results are written to `<out-dir>/<CVE>/<CVE>_single_<n>.json`, next to the
+matching `.stdout.txt` and `.stderr.txt`, plus an aggregate
+`<out-dir>/summary.json`.
 
 ## Output
 

@@ -1,113 +1,170 @@
 #!/usr/bin/env bash
+#
+# SemScan single-case runner.
+#
+# Usage:
+#   ./scripts/analyze.sh <repo_root> [options]
+#
+# The analysis language is fixed to Python: SemScan's static tooling is built on
+# Python's own `ast` module.
+#
+# Options:
+#   --source FILE     source rule file (.jsonl or .yaml)
+#   --sink FILE       sink rule file (.jsonl or .yaml)
+#   --out FILE        output report path
+#   --no-llm          offline mode; no API key required
+#   --dotenv FILE     environment file (default: <root>/.env)
+#   --max-rounds N    planner rounds (default: 5)
+#   -h, --help        show this help
+#
+# Without --source/--sink the bundled example is used:
+#   rules/bench/CVE-2023-6730/source.jsonl + sink.jsonl
+#
+# Default output: result/single/<timestamp>/report.json
+#
 set -euo pipefail
 
-if [[ $# -lt 2 ]]; then
-  echo "Usage: $0 <repo_root> <language> [source_file sink_file] [out_json] [--no-llm] [--dotenv FILE] [--max-rounds N]" >&2
-  echo "  - Explicit rule files must both be .jsonl or both be .yaml" >&2
-  echo "  - If rule files are omitted, defaults to ./rules/source.yaml + ./rules/sink.yaml" >&2
-  echo "    or ./rules/sources.jsonl + ./rules/sinks.jsonl" >&2
-  exit 2
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+die() { printf '\033[1;31m[analyze] ERROR:\033[0m %s\n' "$*" >&2; exit 2; }
+
+usage() {
+  cat <<'USAGE'
+SemScan single-case runner.
+
+Usage:
+  ./scripts/analyze.sh <repo_root> [options]
+
+Options:
+  --source FILE     source rule file (.jsonl or .yaml)
+  --sink FILE       sink rule file (.jsonl or .yaml)
+  --out FILE        output report path
+  --no-llm          offline mode; no API key required
+  --dotenv FILE     environment file (default: <root>/.env)
+  --max-rounds N    planner rounds (default: 5)
+  -h, --help        show this help
+
+The analysis language is fixed to Python.
+
+Without --source/--sink the bundled example is used:
+  rules/bench/CVE-2023-6730/source.jsonl + sink.jsonl
+
+Default output: result/single/<timestamp>/report.json
+USAGE
+  exit 0
+}
+
+if [[ $# -ge 1 ]]; then
+  if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+    usage
+  fi
+fi
+if [[ $# -lt 1 ]]; then
+  usage
 fi
 
-REPO_ROOT="$1"; shift
-LANGUAGE="$1"; shift
+TARGET_REPO="$1"; shift
+# SemScan's static analysis is built on Python's own `ast` module, so the
+# language is fixed rather than being a required argument.
+LANGUAGE="python"
 
-MODE="default"
 SOURCE_FILE=""
 SINK_FILE=""
-
-# Explicit source/sink files: accept both jsonl and yaml.
-if [[ $# -ge 2 ]]; then
-  case "${1:-}:${2:-}" in
-    *.jsonl:*.jsonl|*.yaml:*.yaml)
-      MODE="explicit"
-      SOURCE_FILE="$1"; shift
-      SINK_FILE="$1"; shift
-      ;;
-  esac
-fi
-
-# Optional args:
-# - out_json (positional, optional)
-# - --no-llm (flag, optional)
-# - --dotenv FILE
-# - --max-rounds N
 OUT_FILE=""
-NO_LLM="false"
-DOTENV_FILE=""
+NO_LLM=0
 MAX_ROUNDS=""
-while [[ $# -gt 0 ]]; do
-  arg="$1"
-  if [[ "$arg" == "--no-llm" ]]; then
-    NO_LLM="true"
-    shift
-  elif [[ "$arg" == "--dotenv" ]]; then
-    if [[ $# -lt 2 ]]; then
-      echo "Missing value for --dotenv" >&2
-      exit 2
-    fi
-    DOTENV_FILE="$2"
-    shift 2
-  elif [[ "$arg" == "--max-rounds" ]]; then
-    if [[ $# -lt 2 ]]; then
-      echo "Missing value for --max-rounds" >&2
-      exit 2
-    fi
-    MAX_ROUNDS="$2"
-    shift 2
-  elif [[ -z "$OUT_FILE" ]]; then
-    OUT_FILE="$arg"
-    shift
-  else
-    echo "Unknown extra arg: $arg" >&2
-    echo "Usage: $0 <repo_root> <language> [source_file sink_file] [out_json] [--no-llm] [--dotenv FILE] [--max-rounds N]" >&2
-    exit 2
-  fi
-done
-OUT_FILE="${OUT_FILE:-report.json}"
+# SemScan resolves relative --dotenv paths against the current working
+# directory, so pin it to the repository root to stay independent of where this
+# script is invoked from.
+DOTENV_FILE="${DOTENV_FILE:-${ROOT_DIR}/.env}"
 
-EXTRA_ARGS=()
-if [[ "$NO_LLM" == "true" ]]; then
-  EXTRA_ARGS+=("--no-llm")
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --source)     if [[ $# -lt 2 ]]; then die "--source requires a value"; fi;     SOURCE_FILE="$2"; shift 2 ;;
+    --sink)       if [[ $# -lt 2 ]]; then die "--sink requires a value"; fi;       SINK_FILE="$2";   shift 2 ;;
+    --out)        if [[ $# -lt 2 ]]; then die "--out requires a value"; fi;        OUT_FILE="$2";    shift 2 ;;
+    --dotenv)     if [[ $# -lt 2 ]]; then die "--dotenv requires a value"; fi;     DOTENV_FILE="$2"; shift 2 ;;
+    --max-rounds) if [[ $# -lt 2 ]]; then die "--max-rounds requires a value"; fi; MAX_ROUNDS="$2";  shift 2 ;;
+    --no-llm)     NO_LLM=1; shift ;;
+    -h|--help)    usage ;;
+    *)            die "unknown argument: $1 (try --help)" ;;
+  esac
+done
+
+if [[ ! -d "$TARGET_REPO" ]]; then
+  die "repository not found: $TARGET_REPO"
 fi
-if [[ -n "$DOTENV_FILE" ]]; then
-  EXTRA_ARGS+=("--dotenv" "$DOTENV_FILE")
+REPO_ABS="$(cd "$TARGET_REPO" && pwd)"
+
+# Fall back to the bundled example.
+if [[ -z "$SOURCE_FILE" ]]; then
+  SOURCE_FILE="${ROOT_DIR}/rules/bench/CVE-2023-6730/source.jsonl"
+fi
+if [[ -z "$SINK_FILE" ]]; then
+  SINK_FILE="${ROOT_DIR}/rules/bench/CVE-2023-6730/sink.jsonl"
+fi
+if [[ ! -f "$SOURCE_FILE" ]]; then die "source rule file not found: $SOURCE_FILE"; fi
+if [[ ! -f "$SINK_FILE" ]]; then die "sink rule file not found:   $SINK_FILE"; fi
+
+# Both rule files must use the same format.
+SRC_EXT="${SOURCE_FILE##*.}"
+SINK_EXT="${SINK_FILE##*.}"
+if [[ "$SRC_EXT" != "$SINK_EXT" ]]; then
+  die "source and sink must share one format (both .jsonl or both .yaml)"
+fi
+if [[ "$SRC_EXT" != "jsonl" && "$SRC_EXT" != "yaml" ]]; then
+  die "rule files must be .jsonl or .yaml (got .$SRC_EXT)"
+fi
+
+# Default output: result/single/<timestamp>/report.json
+if [[ -z "$OUT_FILE" ]]; then
+  TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+  OUT_FILE="${ROOT_DIR}/result/single/${TIMESTAMP}/report.json"
+fi
+mkdir -p "$(dirname "$OUT_FILE")"
+OUT_FILE="$(cd "$(dirname "$OUT_FILE")" && pwd)/$(basename "$OUT_FILE")"
+
+PYTHON_BIN="${ROOT_DIR}/.venv/bin/python"
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  PYTHON_BIN="$(command -v python3 || true)"
+fi
+if [[ -z "$PYTHON_BIN" ]]; then
+  die "no Python interpreter found; run ./scripts/install.sh first"
+fi
+
+export PYTHONPATH="${ROOT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"
+
+if [[ $NO_LLM -eq 1 ]]; then MODE="offline"; else MODE="LLM"; fi
+
+printf '\n\033[1;36m==> SemScan single-case run\033[0m\n'
+cat <<EOF
+  repository   : ${REPO_ABS}
+  language     : ${LANGUAGE}
+  source rules : ${SOURCE_FILE}
+  sink rules   : ${SINK_FILE}
+  mode         : ${MODE}
+  output       : ${OUT_FILE}
+EOF
+printf '\n'
+
+ARGS=(
+  -m semscan.main
+  --repo-root "${REPO_ABS}"
+  --language "${LANGUAGE}"
+  --source-file "${SOURCE_FILE}"
+  --sink-file "${SINK_FILE}"
+  --dotenv "${DOTENV_FILE}"
+  --out "${OUT_FILE}"
+)
+if [[ $NO_LLM -eq 1 ]]; then
+  ARGS+=(--no-llm)
 fi
 if [[ -n "$MAX_ROUNDS" ]]; then
-  EXTRA_ARGS+=("--max-rounds" "$MAX_ROUNDS")
+  ARGS+=(--max-rounds "${MAX_ROUNDS}")
 fi
 
-if [[ "$MODE" == "default" ]]; then
-  if [[ -f "./rules/source.yaml" && -f "./rules/sink.yaml" ]]; then
-    SOURCE_FILE="./rules/source.yaml"
-    SINK_FILE="./rules/sink.yaml"
-  elif [[ -f "./rules/sources.jsonl" && -f "./rules/sinks.jsonl" ]]; then
-    SOURCE_FILE="./rules/sources.jsonl"
-    SINK_FILE="./rules/sinks.jsonl"
-  else
-    echo "No default source/sink files found under ./rules" >&2
-    echo "Expected either source.yaml + sink.yaml, or sources.jsonl + sinks.jsonl" >&2
-    exit 2
-  fi
-fi
+"${PYTHON_BIN}" "${ARGS[@]}"
 
-INPUT_ARGS=("--source-file" "$SOURCE_FILE" "--sink-file" "$SINK_FILE")
-
-PYTHONPATH="${PYTHONPATH:-}"
-if [[ -z "$PYTHONPATH" ]]; then
-  export PYTHONPATH="$(pwd)/src"
-else
-  export PYTHONPATH="$(pwd)/src:$PYTHONPATH"
-fi
-
-PYTHON_BIN="python"
-if [[ -x ".venv/bin/python" ]]; then
-  PYTHON_BIN=".venv/bin/python"
-fi
-
-"$PYTHON_BIN" -m semscan.main \
-  --repo-root "$REPO_ROOT" \
-  --language "$LANGUAGE" \
-  "${INPUT_ARGS[@]}" \
-  --out "$OUT_FILE" \
-  "${EXTRA_ARGS[@]}"
+printf '\n\033[1;36m==> Done\033[0m\n'
+echo "  report: ${OUT_FILE}"
