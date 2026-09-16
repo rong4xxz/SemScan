@@ -289,6 +289,22 @@ Other options: `--dotenv FILE`, `--max-rounds N`, `--no-llm`, `-h`.
 
 The two rule files must use the same format: both `.jsonl` or both `.yaml`.
 
+Before starting, the script checks that every rule path exists under `--repo-root`
+and refuses to run otherwise. This matters because a wrong `--repo-root` — for
+instance pointing at `benchmark/CVE-2023-6730/` instead of
+`benchmark/CVE-2023-6730/transformers-4.35.2/` — does not crash SemScan: the exit
+code stays `0`, but the tools cannot open any file, so the report's "evidence"
+ends up being pipeline error text rather than source code.
+
+```text
+Rule paths that do not exist under the repository root:
+  src/transformers/models/rag/retrieval_rag.py  (declared in source.jsonl)
+
+  repository root: .../benchmark/CVE-2023-6730
+  hint: --repo-root must be the repository directory itself,
+        not a parent directory that contains it.
+```
+
 ## Architecture Notes
 
 - `src/semscan/main.py`: CLI entrypoint
