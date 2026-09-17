@@ -34,6 +34,8 @@ SemScan/
 ├── config.env                       # environment template
 ├── requirements.txt
 ├── pyproject.toml
+├── LICENSE                          # MIT, covers SemScan code only
+├── THIRD_PARTY_NOTICES.md           # provenance + licenses of benchmark/*
 └── README.md
 ```
 
@@ -335,6 +337,14 @@ repository path and the two rule paths.
 All paths are relative to the repository root. Blank lines and lines starting
 with `//` or `#` are ignored, so an entry can be disabled without deleting it.
 
+The trees under `benchmark/` are verbatim, unmodified copies of upstream
+open-source projects. They are **not** covered by this repository's `LICENSE`;
+each one remains under its own upstream license. See
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for the per-CVE inventory
+(upstream repository, version or commit, license) and for the additional
+obligations attached to the GPL-3.0, Elastic-2.0, Polyform Shield, Dify and
+Open WebUI snapshots.
+
 ### Batch experiment driver
 
 `scripts/batch_analyze.py` reads `rules/bench.jsonl` and turns every entry into a
@@ -361,3 +371,13 @@ The main output is a JSON report, typically written to `report.json`. It include
 - preprocessing findings,
 - extra pipeline evidence collected during synthesis rounds,
 - the final reachability result.
+
+## License
+
+SemScan's own code — `src/`, `scripts/`, `rules/` — is released under the
+[MIT License](LICENSE).
+
+The third-party source snapshots under `benchmark/` are **excluded** from that
+license. Each snapshot is redistributed unmodified under its own upstream
+license; the full inventory is in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

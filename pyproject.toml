@@ -7,6 +7,9 @@ name = "semscan"
 version = "0.1.0"
 description = "Multi-agent (Skills + LLM) code dataflow analysis MVP"
 requires-python = ">=3.9"
+# Covers the SemScan code only; benchmark/ snapshots keep their own upstream
+# licenses (see THIRD_PARTY_NOTICES.md).
+license = { text = "MIT" }
 dependencies = [
   "openai>=1.0.0",
 ]
