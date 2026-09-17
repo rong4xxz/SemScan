@@ -1,0 +1,3 @@
+bentoml
+torch
+transformers<4.54.0

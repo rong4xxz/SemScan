@@ -1,0 +1,123 @@
+{# BENTOML INTERNAL #}
+{# users can use these values #}
+{% import '_macros.j2' as common %}
+{% set bento__entrypoint = expands_bento_path('env', 'docker', 'entrypoint.sh', bento_path=bento__path) %}
+{% set __enable_buildkit__ = bento__enable_buildkit | default(False) -%}
+{% set __bento_envs__ = bento__envs | default([]) %}
+{% set __bento_secret_envs__ = bento__secret_envs | default([]) %}
+{% set __secret_mounts__ = "" %}
+{% set __secret_exports__ = "" %}
+{% if __bento_secret_envs__ and __enable_buildkit__ %}
+{% set mounts = [] %}
+{% for env in __bento_secret_envs__ %}
+{% do mounts.append("--mount=type=secret,id=%s" % env.name) %}
+{% endfor %}
+{% set __secret_mounts__ = " ".join(mounts) + " " %}
+{% set secret_exports = [] %}
+{% for env in __bento_secret_envs__ %}
+{% do secret_exports.append('%s="$(cat /run/secrets/%s)"' % (env.name, env.name)) %}
+{% endfor %}
+{% set __secret_exports__ = " ".join(secret_exports) + " " %}
+{% endif %}
+
+{% if __enable_buildkit__ %}
+# 1.2.1 is the current docker frontend that both buildkitd and kaniko supports.
+# syntax = {{ bento__buildkit_frontend }}
+#
+{% endif %}
+{% if bento__add_header %}
+# ===========================================
+#
+# THIS IS A GENERATED DOCKERFILE. DO NOT EDIT
+#
+# ===========================================
+{% endif %}
+
+# Block SETUP_BENTO_BASE_IMAGE
+{% block SETUP_BENTO_BASE_IMAGE %}
+FROM {{ __options__base_image }} AS base-container
+
+ENV LANG=C.UTF-8
+
+ENV LC_ALL=C.UTF-8
+
+ENV PYTHONIOENCODING=UTF-8
+
+ENV PYTHONUNBUFFERED=1
+{% endblock %}
+
+{% block SETUP_BENTO_USER %}
+ARG BENTO_USER={{ bento__user }}
+ARG BENTO_USER_UID={{ bento__uid_gid }}
+ARG BENTO_USER_GID={{ bento__uid_gid }}
+RUN if command -v groupadd &>/dev/null; then \
+    groupadd -g $BENTO_USER_GID -o $BENTO_USER && useradd -m -u $BENTO_USER_UID -g $BENTO_USER_GID -o -r $BENTO_USER; \
+    else \
+    addgroup -g $BENTO_USER_GID -S $BENTO_USER && adduser -u $BENTO_USER_UID -G $BENTO_USER -S $BENTO_USER; \
+    fi
+{% endblock %}
+
+{% block SETUP_BENTO_ENVARS %}
+
+ARG BENTO_PATH={{ bento__path }}
+ENV BENTO_PATH=$BENTO_PATH
+ENV BENTOML_HOME={{ bento__home }}
+ENV BENTOML_HF_CACHE_DIR={{ bento__path }}/hf-models
+ENV BENTOML_CONTAINERIZED=true
+
+{% for env in __bento_envs__ %}
+{% set stage = env.stage | default("all") -%}
+{% if stage != "runtime" -%}
+ARG {{ env.name }}{% if env.value %}={{ env.value | bash_quote }}{% endif %}
+
+ENV {{ env.name }}=${{ env.name }}
+{% endif -%}
+{% endfor %}
+
+RUN mkdir $BENTO_PATH && chown {{ bento__user }}:{{ bento__user }} $BENTO_PATH -R
+WORKDIR $BENTO_PATH
+{% endblock %}
+
+{% block SETUP_BENTO_COMPONENTS %}
+COPY --chown={{ bento__user }}:{{ bento__user }} ./env/docker ./env/docker/
+{% for command in __options__commands %}
+{% call common.RUN(__enable_buildkit__) -%} {{ __secret_mounts__ }} {% endcall -%} {{ __secret_exports__ }}{{ command }}
+{% endfor %}
+{% call common.RUN(__enable_buildkit__) -%} {{ __secret_mounts__ }} {% endcall -%} {{ __secret_exports__ }}command -v uv >/dev/null || pip install uv
+{% call common.RUN(__enable_buildkit__) -%} {{ __secret_mounts__ }} {% endcall -%} {{ __secret_exports__ }}UV_PYTHON_INSTALL_DIR=/app/python/ uv venv --python {{ __options__python_version }} /app/.venv && \
+    chown -R {{ bento__user }}:{{ bento__user }} /app/.venv
+ENV VIRTUAL_ENV=/app/.venv
+ENV UV_COMPILE_BYTECODE=1
+ENV UV_NO_PROGRESS=1
+ENV PATH=/app/.venv/bin:${PATH}
+{% set __pip_cache__ = common.mount_cache("/root/.cache/") %}
+
+COPY --chown={{ bento__user }}:{{ bento__user }} ./env/python ./env/python/
+# install python packages
+{% call common.RUN(__enable_buildkit__) -%} {{ __secret_mounts__ }} {{ __pip_cache__ }} {% endcall -%} if [ -d ./src ]; \
+    then INSTALL_ROOT="./src"; \
+    else INSTALL_ROOT="./env/python"; \
+    fi; {{ __secret_exports__ }}uv --directory $INSTALL_ROOT pip install -r $BENTO_PATH/env/python/requirements.txt
+
+{% for command in __options__post_commands %}
+{% call common.RUN(__enable_buildkit__) -%} {{ __secret_mounts__ }} {% endcall -%} {{ __secret_exports__ }}{{ command }}
+{% endfor %}
+
+COPY --chown={{ bento__user }}:{{ bento__user }} . ./
+{% endblock %}
+
+# Block SETUP_BENTO_ENTRYPOINT
+{% block SETUP_BENTO_ENTRYPOINT %}
+# Default port for BentoServer
+EXPOSE 3000
+
+# Expose Prometheus port
+EXPOSE {{ __prometheus_port__ }}
+
+RUN chmod +x {{ bento__entrypoint }}
+
+USER {{ bento__user }}
+
+ENTRYPOINT [ "{{ bento__entrypoint }}" ]
+
+{% endblock %}
