@@ -1,0 +1,23 @@
+# Don't forget to run bash scripts/create_test_requirements.sh and scripts/create_test_requirements-37.sh from unix or wsl when you update this file.
+IPython
+altair
+asyncio
+boto3
+coverage
+fastapi>=0.101.0
+gradio_pdf==0.0.3
+httpx
+huggingface_hub
+polars==0.20.5
+pydantic[email]
+pytest
+pytest-asyncio
+pytest-cov
+ruff>=0.1.13
+respx
+scikit-image
+torch
+tqdm
+transformers
+vega_datasets
+diffusers
